@@ -9,9 +9,34 @@ import functools
 import sys
 import requests
 import re
-from loguru import logger
 from playwright.sync_api import sync_playwright
-from tabulate import tabulate
+from notify import send
+import logging
+
+
+os.environ.pop("DISPLAY", None)
+os.environ.pop("DYLD_LIBRARY_PATH", None)
+
+
+# 配置 logging
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+# 创建控制台 Handler
+console_handler = logging.StreamHandler()
+console_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(message)s'))
+# 将两个 Handler 添加到 logger
+logger.addHandler(console_handler)
+
+
+USERNAME = os.environ.get("LINUXDO_USERNAME")
+PASSWORD = os.environ.get("LINUXDO_PASSWORD")
+BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in ['false', '0', 'off']
+if not USERNAME:
+    USERNAME = os.environ.get('USERNAME')
+if not PASSWORD:
+    PASSWORD = os.environ.get('PASSWORD')
+HOME_URL = "https://linux.do/"
+LOGIN_URL = "https://linux.do/login"
 
 
 def retry_decorator(retries=3):
@@ -33,65 +58,69 @@ def retry_decorator(retries=3):
     return decorator
 
 
-os.environ.pop("DISPLAY", None)
-os.environ.pop("DYLD_LIBRARY_PATH", None)
-
-USERNAME = os.environ.get("LINUXDO_USERNAME")
-PASSWORD = os.environ.get("LINUXDO_PASSWORD")
-BROWSE_ENABLED = os.environ.get("BROWSE_ENABLED", "true").strip().lower() not in ['false', '0', 'off']
-if not USERNAME:
-    USERNAME = os.environ.get('USERNAME')
-if not PASSWORD:
-    PASSWORD = os.environ.get('PASSWORD')
-GOTIFY_URL = os.environ.get("GOTIFY_URL")  # Gotify 服务器地址
-GOTIFY_TOKEN = os.environ.get("GOTIFY_TOKEN")  # Gotify 应用的 API Token
-SC3_PUSH_KEY = os.environ.get("SC3_PUSH_KEY")  # Server酱³ SendKey
-
-HOME_URL = "https://linux.do/"
-LOGIN_URL = "https://linux.do/login"
-
-
 class LinuxDoBrowser:
+    __slots__ = ["pw", "browser", "context", "topic_list"]
+    
     def __init__(self) -> None:
         self.pw = sync_playwright().start()
-        self.browser = self.pw.firefox.launch(headless=True, timeout=30000)
-        self.context = self.browser.new_context()
-        self.page = self.context.new_page()
-        self.page.goto(HOME_URL)
+        self.browser = self.pw.firefox.launch(headless=True, timeout=30000,
+            firefox_user_prefs={
+                'javascript.enabled': True,
+                'network.http.use-cache': True
+            },
+            args=['--disable-gpu', '--single-process', '--enable-low-end-device-mode']
+            )
+        self.context = self.browser.new_context(
+            java_script_enabled=True,
+            ignore_https_errors=True,
+            extra_http_headers={'Accept-Encoding': 'gzip'}
+        )
 
     def login(self):
         logger.info("开始登录")
-        # self.page.click(".login-button .d-button-label")
-        self.page.goto(LOGIN_URL)
-        time.sleep(2)
-        self.page.fill("#login-account-name", USERNAME)
-        time.sleep(2)
-        self.page.fill("#login-account-password", PASSWORD)
-        time.sleep(2)
-        self.page.click("#login-button")
-        time.sleep(10)
-        user_ele = self.page.query_selector("#current-user")
-        if not user_ele:
-            logger.error("登录失败")
-            return False
-        else:
-            logger.info("登录成功")
-            return True
+        page = self.context.new_page()
+        success = False
+        try:
+            page.goto(LOGIN_URL)
+            time.sleep(random.uniform(5.0, 8.0))
+            page.fill("#login-account-name", USERNAME)
+            time.sleep(random.uniform(2.0, 3.0))
+            page.fill("#login-account-password", PASSWORD)
+            time.sleep(random.uniform(2.0, 3.0))
+            page.click("#login-button")
+            time.sleep(random.uniform(9.0, 11.0))
+            user_ele = page.query_selector("#current-user")
+            if not user_ele:
+                logger.error("登录失败")
+            else:
+                logger.info("登录成功")
+                time.sleep(random.uniform(2.0, 3.0))
+                self.topic_list = [topic.get_attribute("href") for topic in page.query_selector_all("#list-area .title")[:30]]
+                success = True
+        finally:
+            page.close()
+            gc.collect()
+            time.sleep(random.uniform(2.0, 3.0))
 
+        return success
+            
     def click_topic(self):
-        topic_list = self.page.query_selector_all("#list-area .title")
-        logger.info(f"发现 {len(topic_list)} 个主题帖")
-        for topic in topic_list:
-            self.click_one_topic(topic.get_attribute("href"))
+        logger.info(f"发现 {len(self.topic_list)} 个主题帖")
+        for topic in self.topic_list:
+            self.click_one_topic(topic)
 
     @retry_decorator()
     def click_one_topic(self, topic_url):
         page = self.context.new_page()
-        page.goto(HOME_URL + topic_url)
-        if random.random() < 0.3:  # 0.3 * 30 = 9
-            self.click_like(page)
-        self.browse_post(page)
-        page.close()
+        try:
+            page.goto(HOME_URL + topic_url)
+            if random.random() < 0.3:  # 0.3 * 30 = 9
+                self.click_like(page)
+            self.browse_post(page)
+        finally:
+            page.close()
+            gc.collect()
+            time.sleep(random.uniform(2.0, 3.0))
 
     def browse_post(self, page):
         prev_url = None
@@ -104,7 +133,7 @@ class LinuxDoBrowser:
             logger.info(f"已加载页面: {page.url}")
 
             if random.random() < 0.03:  # 33 * 4 = 132
-                logger.success("随机退出浏览")
+                logger.info("随机退出浏览")
                 break
 
             # 检查是否到达页面底部
@@ -113,7 +142,7 @@ class LinuxDoBrowser:
             if current_url != prev_url:
                 prev_url = current_url
             elif at_bottom and prev_url == current_url:
-                logger.success("已到达页面底部，退出浏览")
+                logger.info("已到达页面底部，退出浏览")
                 break
 
             # 动态随机等待
@@ -130,7 +159,6 @@ class LinuxDoBrowser:
             self.click_topic() # 点击主题
             logger.info("完成浏览任务")
             
-        self.print_connect_info() # 打印连接信息
         self.send_notifications(BROWSE_ENABLED) # 发送通知
 
     def click_like(self, page):
@@ -147,77 +175,11 @@ class LinuxDoBrowser:
         except Exception as e:
             logger.error(f"点赞失败: {str(e)}")
 
-    def print_connect_info(self):
-        logger.info("获取连接信息")
-        page = self.context.new_page()
-        page.goto("https://connect.linux.do/")
-        rows = page.query_selector_all("table tr")
-
-        info = []
-
-        for row in rows:
-            cells = row.query_selector_all("td")
-            if len(cells) >= 3:
-                project = cells[0].text_content().strip()
-                current = cells[1].text_content().strip()
-                requirement = cells[2].text_content().strip()
-                info.append([project, current, requirement])
-
-        print("--------------Connect Info-----------------")
-        print(tabulate(info, headers=["项目", "当前", "要求"], tablefmt="pretty"))
-
-        page.close()
-
     def send_notifications(self, browse_enabled):
-        status_msg = "✅每日登录成功"
+        status_msg = "✅登录成功"
         if browse_enabled:
             status_msg += " + 浏览任务完成"
-            
-        if GOTIFY_URL and GOTIFY_TOKEN:
-            try:
-                response = requests.post(
-                    f"{GOTIFY_URL}/message",
-                    params={"token": GOTIFY_TOKEN},
-                    json={
-                        "title": "LINUX DO",
-                        "message": status_msg,
-                        "priority": 1
-                    },
-                    timeout=10
-                )
-                response.raise_for_status()
-                logger.success("消息已推送至Gotify")
-            except Exception as e:
-                logger.error(f"Gotify推送失败: {str(e)}")
-        else:
-            logger.info("未配置Gotify环境变量，跳过通知发送")
-
-        if SC3_PUSH_KEY:
-            match = re.match(r"sct(\d+)t", SC3_PUSH_KEY, re.I)
-            if not match:
-                logger.error("❌ SC3_PUSH_KEY格式错误，未获取到UID，无法使用Server酱³推送")
-                return
-
-            uid = match.group(1)
-            url = f'https://{uid}.push.ft07.com/send/{SC3_PUSH_KEY}'
-            params = {
-                "title": "LINUX DO",
-                "desp": status_msg
-            }
-
-            attempts = 5
-            for attempt in range(attempts):
-                try:
-                    response = requests.get(url, params=params, timeout=10)
-                    response.raise_for_status()
-                    logger.success(f"Server酱³推送成功: {response.text}")
-                    break
-                except Exception as e:
-                    logger.error(f"Server酱³推送失败: {str(e)}")
-                    if attempt < attempts - 1:
-                        sleep_time = random.randint(180, 360)
-                        logger.info(f"将在 {sleep_time} 秒后重试...")
-                        time.sleep(sleep_time)
+        send("linuxdo签到日志：", status_msg)
 
 
 if __name__ == "__main__":
