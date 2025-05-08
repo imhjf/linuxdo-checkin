@@ -12,6 +12,7 @@ import re
 from playwright.sync_api import sync_playwright
 from notify import send
 import logging
+import gc
 
 
 os.environ.pop("DISPLAY", None)
